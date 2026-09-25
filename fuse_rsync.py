@@ -17,8 +17,6 @@ import fuse
 fuse.fuse_python_api = (0, 2)
 log = logging.getLogger("fuse_rsync")
 
-RSYNC_EXIT_PARTIAL_TRANSFER_DUE_TO_ERROR = 23
-
 SUPPORTED_ST_MODE_MASK = 0o777 | stat.S_IFLNK | stat.S_IFDIR | stat.S_IFREG
 
 FILE_MODE_RE = re.compile("^.([-r][-w][-xsS]){2}([-r][-w][-xtT])$", re.ASCII)
@@ -185,12 +183,13 @@ class FuseRsync(fuse.Fuse):
         self.parser.add_option(
             mountopt="module",
             type=str,
+            default="",
             help="Rsync module on remote host"
         )
         self.parser.add_option(
             mountopt="path",
             type=str,
-            default="/",
+            default="",
             help="Path under the module that acts as the mountpoint root"
         )
         self.parser.add_option(
@@ -234,6 +233,8 @@ class FuseRsync(fuse.Fuse):
                 error = "Cache TTL must be at least 0"
             elif options.metadata_cache_size < 1:
                 error = "Cache size must be greater than or equal to 1"
+            elif options.path and not options.module:
+                error = "A path cannot be specified without a module name"
             else:
                 error = None
 
@@ -264,13 +265,16 @@ class FuseRsync(fuse.Fuse):
             if options.user:
                 self._remote_url += options.user + "@"
 
-            self._remote_url += options.host + "/" + options.module
+            self._remote_url += options.host
 
-            if options.path:
-                options.path = "/" + options.path.lstrip("/")
-                self._remote_url = os.path.join(
-                    self._remote_url, os.path.relpath(options.path, "/")
-                )
+            if options.module:
+                self._remote_url += "/" + options.module
+
+                if options.path:
+                    options.path = "/" + options.path.lstrip("/")
+                    self._remote_url = os.path.join(
+                        self._remote_url, os.path.relpath(options.path, "/")
+                    )
 
             if options.password:
                 self._environment['RSYNC_PASSWORD'] = options.password
@@ -334,23 +338,36 @@ class FuseRsync(fuse.Fuse):
                     cmdline, env=self._environment, errors="surrogateescape"
                 )
             except subprocess.CalledProcessError as err:
-                if err.returncode != RSYNC_EXIT_PARTIAL_TRANSFER_DUE_TO_ERROR:
+                # 5 is returned when a module does not exist, and 23 is
+                # returned when a module does not exist.
+                if err.returncode in (5, 23):
+                    output = ""
+                else:
                     raise err
-
-                return listing
 
             if isdir:
                 self._attr_cache.set(remote_url, listing)
 
+            must_add_dot_entry = isdir
+
             for line in output.splitlines():
                 try:
-                    attrs, size_str, date, time, filename = line.split(None, 4)
-                    filename = rsync_unescape(filename)
+                    if "\t" in line:
+                        name, comment = line.split("\t")
+                        filename = name.strip()
+                        size = 4096  # Common size for directories on Linux.
+                        attrs = "dr-xr-xr-x"
+                        dt = datetime.datetime.now()
+                    else:
+                        attrs, size_str, date, time, filename = line.split()
+                        filename = rsync_unescape(filename)
+                        size = int(size_str.replace(',', ''))
+                        dt = datetime.datetime.strptime(
+                            f"{date} {time} +0000", "%Y/%m/%d %H:%M:%S %z"
+                        )
 
-                    size = int(size_str.replace(',', ''))
-                    dt = datetime.datetime.strptime(
-                        f"{date} {time} +0000", "%Y/%m/%d %H:%M:%S %z"
-                    )
+                        if filename == ".":
+                            must_add_dot_entry = False
                 except ValueError:
                     log.warn("Unable to parse line: %r", line)
                 else:
@@ -364,6 +381,14 @@ class FuseRsync(fuse.Fuse):
                     self._attr_cache.set(
                         remote_url + filename if isdir else remote_url, [entry]
                     )
+
+            if must_add_dot_entry:
+                listing.append({
+                    "st_mode": text_to_mode("dr-xr-xr-x"),
+                    "size": 4096,
+                    "timestamp": datetime.datetime.now().timestamp(),
+                    "filename": ".",
+                })
 
         return listing
 
