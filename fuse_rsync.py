@@ -292,7 +292,6 @@ class FuseRsync(fuse.Fuse):
             self._readlink_path_locks = collections.defaultdict(threading.Lock)
             self._readlink_path_locks_lock = threading.RLock()
 
-            self._readlink_cache_lock = threading.Lock()
             self._readlink_cache = TTLLRUMapping(
                 ttl=options.metadata_cache_ttl,
                 maxsize=None,
@@ -427,8 +426,7 @@ class FuseRsync(fuse.Fuse):
         log.critical("readlink(%r)", path)
 
         while True:
-            with self._readlink_cache_lock:
-                destination = self._readlink_cache.get(path, None)
+            destination = self._readlink_cache.get(path, None)
 
             if destination is None:
                 with self._readlink_path_locks_lock:
