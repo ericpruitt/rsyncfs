@@ -442,16 +442,20 @@ class FuseRsync(fuse.Fuse):
                     lock.release()
                     continue
 
+                localpath = None
+
                 try:
                     _, localpath = self.fetch(path, check_call=True)
                     destination = os.readlink(localpath)
-                    self._readlink_cache.set(path, destination)
-                    os.unlink(localpath)
                 except Exception as error:
+                    destination = -(getattr(error, "errno", 0) or errno.EIO)
                     log.exception("readlink(%r)", path)
-                    destination = -getattr(error, "errno", errno.EIO)
                 finally:
+                    self._readlink_cache.set(path, destination)
                     lock.release()
+
+                    if localpath:
+                        os.unlink(localpath)
 
             log.debug("readlink(%r) -> %r", path, destination)
             return destination
