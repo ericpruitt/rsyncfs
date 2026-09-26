@@ -5,6 +5,7 @@ import errno
 import logging
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -23,6 +24,27 @@ FILE_MODE_RE = re.compile("^.([-r][-w][-xsS]){2}([-r][-w][-xtT])$", re.ASCII)
 RSYNC_ESCAPE_RE = re.compile(br"\\#([0-3][0-7][0-7])", re.ASCII)
 
 EXIT_BAD_USAGE = 2
+
+
+class FuseStat(fuse.Stat):
+    """
+    An augmented version of fuse.Stat that implements __repr__ and __str__ with
+    detailed output.
+    """
+    def __str__(self):
+        return self.__repr__()
+
+    def __repr__(self):
+        items = []
+
+        for name in dir(self):
+            if name.startswith("st_"):
+                items.append((name, getattr(self, name)))
+
+        kwargs = ", ".join(
+            sorted(f"{name}={value!r}" for name, value in items)
+        )
+        return f"{self.__class__.__name__}({kwargs})"
 
 
 class TTLLRUMapping:
@@ -324,19 +346,25 @@ class FuseRsync(fuse.Fuse):
           time.
         - filename: The file's basename.
         """
+        log.debug("list(%r)", path)
+
         remote_url = self._remote_url + path
         isdir = path.endswith("/")
         listing = self._attr_cache.get(remote_url, [])
 
-        if not listing:
-            cmdline = [self.rsync, "--8-bit-output", "--list-only", remote_url]
-            log.debug("executing %s", " ".join(cmdline))
+        if listing:
+            log.debug("list(%r): cache hit", path)
+        else:
+            argv = [self.rsync, "--8-bit-output", "--list-only", remote_url]
+            log.info("list(%r): %s", path, " ".join(map(shlex.quote, argv)))
 
             try:
                 output = subprocess.check_output(
-                    cmdline, env=self._environment, errors="surrogateescape"
+                    argv, env=self._environment, errors="surrogateescape"
                 )
             except subprocess.CalledProcessError as err:
+                log.debug("list(%r): rsync returned %d", path, err.returncode)
+
                 # 5 is returned when a module does not exist, and 23 is
                 # returned when a module does not exist.
                 if err.returncode in (5, 23):
@@ -350,6 +378,8 @@ class FuseRsync(fuse.Fuse):
             must_add_dot_entry = isdir
 
             for line in output.splitlines():
+                log.debug("list(%r): processing rsync line: %s", path, line)
+
                 try:
                     if "\t" in line:
                         name, comment = line.split("\t")
@@ -370,7 +400,7 @@ class FuseRsync(fuse.Fuse):
                         if filename == ".":
                             must_add_dot_entry = False
                 except ValueError:
-                    log.warn("Unable to parse line: %r", line)
+                    log.error("list(%r): invalid rsync output: %r", path, line)
                 else:
                     entry = {
                         "st_mode": text_to_mode(attrs),
@@ -379,6 +409,7 @@ class FuseRsync(fuse.Fuse):
                         "filename": filename
                     }
                     listing.append(entry)
+                    log.debug("list(%r) -> %r", path, entry)
                     self._attr_cache.set(
                         remote_url + filename if isdir else remote_url, [entry]
                     )
@@ -391,28 +422,40 @@ class FuseRsync(fuse.Fuse):
                     "filename": ".",
                 })
 
+        log.debug("list(%r) -> returning list; length %d", path, len(listing))
         return listing
 
-    def fetch(self, remotepath, *, check_call=False):
+    def fetch(self, path, *, check_call=False):
         """
         Launch an rsync process to copy a remote file to the local system. The
         download is done in a non-blocking manner, and the returned subprocess
         object can be used to check on its status.
 
+        Arguments:
+        - path: Path of the file.
+        - check_call: When this is True, wait for the rsync process to exit and
+          report a non-zero exit code with a subprocess.CalledProcessError
+          exception.
+
         Return: A tuple consisting of the rsync subprocess (a subprocess.Popen
         instance) and the name of the local file.
         """
-        remote_url = self._remote_url + remotepath
+        log.debug("fetch(%r, check_call=%r)", path, check_call)
+
+        remote_url = self._remote_url + path
         fd, localpath = tempfile.mkstemp()
         os.close(fd)
 
         argv = [self.rsync, "--links", "--inplace", remote_url, localpath]
-        log.critical("executing %s", " ".join(argv))
+        log.info("fetch(%r, ...): %s", path, " ".join(map(shlex.quote, argv)))
         process = subprocess.Popen(argv, env=self._environment)
 
         if check_call and process.wait():
             raise subprocess.CalledProcessError(argv, subprocess.returncode)
 
+        log.debug(
+            "fetch(%r, ...) -> (pid=%d, %r)", path, process.pid, localpath
+        )
         return (process, localpath)
 
     def readlink(self, path):
@@ -425,7 +468,7 @@ class FuseRsync(fuse.Fuse):
         Return: If the operation succeeds, the destination of the symbolic link
         is returned. Otherwise, a negated errno value is returned.
         """
-        log.critical("readlink(%r)", path)
+        log.debug("readlink(%r)", path)
 
         while True:
             destination = self._readlink_cache.get(path, None)
@@ -440,8 +483,10 @@ class FuseRsync(fuse.Fuse):
                 # it to finish then try to retrieve it from the readlink cache
                 # again.
                 if not acquired:
+                    log.debug("readlink(%r): fetch already in progress", path)
                     lock.acquire()
                     lock.release()
+                    log.debug("readlink(%r): async fetch done; retrying", path)
                     continue
 
                 localpath = None
@@ -451,51 +496,54 @@ class FuseRsync(fuse.Fuse):
                     destination = os.readlink(localpath)
                 except Exception as error:
                     destination = -(getattr(error, "errno", 0) or errno.EIO)
-                    log.exception("readlink(%r)", path)
+                    log.error("readlink(%r): %s: %s", path, localpath, error)
                 finally:
                     self._readlink_cache.set(path, destination)
                     lock.release()
 
                     if localpath:
                         os.unlink(localpath)
+            else:
+                log.debug("readlink(%r): cache hit", path)
 
             log.debug("readlink(%r) -> %r", path, destination)
             return destination
 
-    def getattr(self, path, fh=None):
+    def getattr(self, path):
         """
         Get a file's status.
 
         Arguments:
         - path: Path of the file in FUSE filesystem.
 
-        Return: A populated instance of fuse.Stat or, if the file does not
-        exist, `-errno.ENOENT`.
+        Return: A populated instance of FuseStat (which sublcasses fuse.Stat
+        for better logging) or, if the file does not exist, `-errno.ENOENT`.
         """
         log.debug("getattr(%r)", path)
 
         try:
             listing = self.list(path)
-        except Exception:
-            log.exception("list(%r): exception raised", path)
+        except Exception as error:
+            log.error("getattr(%r) -> EIO; %s", path, error)
             return -errno.EIO
 
         if not listing:
-            log.warning("%s: file not found or rsync output was invalid", path)
+            log.warning("getattr(%r) -> ENOENT; no results from list()", path)
             return -errno.ENOENT
 
         if path.endswith("/"):
             listing = [x for x in listing if x["filename"] == "."]
 
-        if len(listing) == 0:
+        if not listing:
+            log.error("getattr(%r) -> ENOENT; list() is missing '.'", path)
             return -errno.ENOENT
         elif len(listing) > 1:
+            log.error("getattr(%r) -> EIO; too many list() results", path)
             return -errno.EIO
 
         metadata = listing[0]
         timestamp = metadata["timestamp"]
-
-        return fuse.Stat(
+        st = FuseStat(
             st_atime=timestamp,  # TODO: consider maintaining in-memory atimes.
             st_ctime=timestamp,
             st_mtime=timestamp,
@@ -505,6 +553,9 @@ class FuseRsync(fuse.Fuse):
             st_size=metadata["size"],
             st_mode=metadata["st_mode"] & SUPPORTED_ST_MODE_MASK,
         )
+
+        log.debug("getattr(%r) -> %r", path, st)
+        return st
 
     def readdir(self, path, offset):
         """
@@ -517,17 +568,20 @@ class FuseRsync(fuse.Fuse):
         Yield: Instances of fuse.Direntry. Entries for "." and ".." will always
         be yielded.
         """
-        log.debug("readdir(%r, %s)", path, offset)
-
+        log.debug("readdir(%r, ...) -> %r", path, ".")
         yield fuse.Direntry('.')
+
+        log.debug("readdir(%r, ...) -> %r", path, "..")
         yield fuse.Direntry('..')
 
         if not path.endswith("/"):
             path += "/"
 
         for dirent in self.list(path):
-            if dirent["filename"] != ".":
-                yield fuse.Direntry(dirent["filename"])
+            filename = dirent["filename"]
+            if filename != ".":
+                log.debug("readdir(%r, ...) -> %r", path, filename)
+                yield fuse.Direntry(filename)
 
     def open(self, path, flags):
         """
@@ -546,14 +600,16 @@ class FuseRsync(fuse.Fuse):
         log.debug("open(%r, 0x%x)", path, flags)
 
         if (flags & (os.O_RDONLY | os.O_WRONLY | os.O_RDWR)) != os.O_RDONLY:
-            log.debug("open(%r, 0x%x) -> EACCES", path, flags)
+            log.warning("open(%r, 0x%x) -> EACCES", path, flags)
             return -errno.EACCES
 
         with self._file_cache_lock:
             if path in self._file_cache:
                 self._file_cache[path]["refcount"] += 1
                 _, localfile = self._file_cache[path]["proc_file"]
+                log.debug("open(%r, 0x%x): cache hit", path, flags)
             else:
+                log.debug("open(%r, 0x%x): cache miss", path, flags)
                 proc_file = _, localfile = self.fetch(path)
                 self._file_cache[path] = {
                     "refcount": 1,
@@ -561,7 +617,7 @@ class FuseRsync(fuse.Fuse):
                 }
 
         handle = os.open(localfile, os.O_RDONLY)
-        log.debug("open(%r, 0x%x) -> %d", path, flags, handle)
+        log.debug("open(%r, 0x%x) -> %d (%s)", path, flags, handle, localfile)
         return FuseRsyncFileInfo(handle)
 
     def read(self, path, length, offset, fh):
@@ -577,7 +633,7 @@ class FuseRsync(fuse.Fuse):
         empty string of bytes if the end of the file has been reached. If this
         function fails, `-errno.EIO` is returned.
         """
-        log.critical("read(%r, %d, %d, %r)", path, length, offset, fh)
+        log.debug("read(%r, %d, %d, %r)", path, length, offset, fh)
 
         minimum_size_required = length + offset
         process, localfile = self._file_cache[path]["proc_file"]
@@ -585,8 +641,8 @@ class FuseRsync(fuse.Fuse):
         while process.poll() is None:
             try:
                 st = os.fstat(fh.handle)
-            except Exception:
-                log.exception("os.fstat(%r (%r))", fh.handle, localfile)
+            except Exception as error:
+                log.error("read(%r, ...) -> EIO; fstat: %s", path, error)
                 return -errno.EIO
 
             if st.st_size >= minimum_size_required:
@@ -595,16 +651,23 @@ class FuseRsync(fuse.Fuse):
             time.sleep(0.100)
 
         if process.poll():
-            log.error("%s: rsync returned code %s", path, process.returncode)
-
             # Even if rsync failed, we will only report a problem if the user
             # is trying to read past any data that was already downloaded.
             st = os.fstat(fh.handle)
 
+            log.warning(
+                "read(%r, ...): rsync returned %d after downloading %dB", path,
+                process.returncode, st.st_size
+            )
+
             if st.st_size < minimum_size_required:
+                log.error("read(%r, ...) -> EIO; data not available", path)
                 return -errno.EIO
 
-        return os.pread(fh.handle, length, offset)
+        data = os.pread(fh.handle, length, offset)
+        log.debug("read(%r, ...) -> os.pread(%d, %d, %d) -> %dB",
+            path, fh.handle, length, offset, len(data))
+        return data
 
     def release(self, path, flags, fh):
         """
@@ -618,7 +681,7 @@ class FuseRsync(fuse.Fuse):
         - flags: This value is unused.
         - fh: FUSE file handle for the opened file.
         """
-        log.debug("release(%r, %d, %d)", path, flags, fh.handle)
+        log.debug("release(%r, ..., %r)", path, fh)
 
         with self._file_cache_lock:
             os.close(fh.handle)
@@ -626,6 +689,7 @@ class FuseRsync(fuse.Fuse):
             self._file_cache[path]["refcount"] -= 1
 
             if self._file_cache[path]["refcount"] <= 0:
+                log.debug("release(%r, ...): deleting local copy", path)
                 process, localfile = self._file_cache[path]["proc_file"]
                 del self._file_cache[path]
                 os.unlink(localfile)
