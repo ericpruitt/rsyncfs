@@ -358,7 +358,9 @@ class FuseRsync(fuse.Fuse):
                         attrs = "dr-xr-xr-x"
                         dt = datetime.datetime.now()
                     else:
-                        attrs, size_str, date, time, filename = line.split()
+                        attrs, size_str, date, time, filename = line.split(
+                            None, 4
+                        )
                         filename = rsync_unescape(filename)
                         size = int(size_str.replace(',', ''))
                         dt = datetime.datetime.strptime(
