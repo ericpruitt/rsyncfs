@@ -20,10 +20,21 @@ log = logging.getLogger("fuse_rsync")
 
 SUPPORTED_ST_MODE_MASK = 0o777 | stat.S_IFLNK | stat.S_IFDIR | stat.S_IFREG
 
+DIR_INODE_SIZE = 4096  # Common size on Linux
+
 FILE_MODE_RE = re.compile("^.([-r][-w][-xsS]){2}([-r][-w][-xtT])$", re.ASCII)
 RSYNC_ESCAPE_RE = re.compile(br"\\#([0-3][0-7][0-7])", re.ASCII)
 
 EXIT_BAD_USAGE = 2
+
+
+class ArgV(list):
+    """
+    Wrapper around lists intended for process argument lists. It overrides
+    `__str__` to return a (mostly) shell-safe string.
+    """
+    def __str__(self):
+        return " ".join(map(shlex.quote, self))
 
 
 class LockPool:
@@ -366,7 +377,8 @@ class FuseRsync(fuse.Fuse):
                 maxsize=None,
             )
 
-            self._attr_cache = TTLLRUMapping(
+            self._list_lock_pool = LockPool(2048)
+            self._list_cache = TTLLRUMapping(
                 ttl=options.metadata_cache_ttl,
                 maxsize=options.metadata_cache_size,
             )
@@ -397,77 +409,102 @@ class FuseRsync(fuse.Fuse):
 
         remote_url = self._remote_url + path
         isdir = path.endswith("/")
-        listing = self._attr_cache.get(remote_url, [])
 
-        if listing:
-            log.debug("list(%r): cache hit", path)
-        else:
-            argv = [self.rsync, "--8-bit-output", "--list-only", remote_url]
-            log.info("list(%r): %s", path, " ".join(map(shlex.quote, argv)))
+        while True:
+            listing = self._list_cache.get(path, None)
+
+            if listing is not None:
+                log.debug("list(%r): cache hit", path)
+                break
+
+            lock = self._list_lock_pool[path]
+            acquired = lock.acquire(False)
+
+            # Another thread already querying the server for this path, so we
+            # wait on it to finish then check the cache again.
+            if not acquired:
+                log.debug("list(%r): operation already in progress", path)
+                lock.acquire()
+                lock.release()
+                log.debug("list(%r): async operation done; retrying", path)
+                continue
 
             try:
-                output = subprocess.check_output(
-                    argv, env=self._environment, errors="surrogateescape"
+                argv = ArgV(
+                    [self.rsync, "--8-bit-output", "--list-only", remote_url]
                 )
-            except subprocess.CalledProcessError as err:
-                log.debug("list(%r): rsync returned %d", path, err.returncode)
-
-                # 5 is returned when a module does not exist, and 23 is
-                # returned when a module does not exist.
-                if err.returncode in (5, 23):
-                    output = ""
-                else:
-                    raise err
-
-            if isdir:
-                self._attr_cache.set(remote_url, listing)
-
-            must_add_dot_entry = isdir
-
-            for line in output.splitlines():
-                log.debug("list(%r): processing rsync line: %s", path, line)
+                log.info("list(%r): %s", path, argv)
 
                 try:
-                    if "\t" in line:
-                        name, comment = line.split("\t")
-                        filename = name.strip()
-                        size = 4096  # Common size for directories on Linux.
-                        attrs = "dr-xr-xr-x"
-                        dt = datetime.datetime.now()
-                    else:
-                        attrs, size_str, date, time, filename = line.split(
-                            None, 4
-                        )
-                        filename = rsync_unescape(filename)
-                        size = int(size_str.replace(',', ''))
-                        dt = datetime.datetime.strptime(
-                            f"{date} {time} +0000", "%Y/%m/%d %H:%M:%S %z"
-                        )
-
-                        if filename == ".":
-                            must_add_dot_entry = False
-                except ValueError:
-                    log.error("list(%r): invalid rsync output: %r", path, line)
-                else:
-                    entry = {
-                        "st_mode": text_to_mode(attrs),
-                        "size": size,
-                        "timestamp": dt.timestamp(),
-                        "filename": filename
-                    }
-                    listing.append(entry)
-                    log.debug("list(%r) -> %r", path, entry)
-                    self._attr_cache.set(
-                        remote_url + filename if isdir else remote_url, [entry]
+                    output = subprocess.check_output(
+                        argv, env=self._environment, errors="surrogateescape"
+                    )
+                except subprocess.CalledProcessError as err:
+                    log.debug(
+                        "list(%r): rsync returned %d", path, err.returncode
                     )
 
-            if must_add_dot_entry:
-                listing.append({
-                    "st_mode": text_to_mode("dr-xr-xr-x"),
-                    "size": 4096,
-                    "timestamp": datetime.datetime.now().timestamp(),
-                    "filename": ".",
-                })
+                    # 5 is returned when a module does not exist, and 23 is
+                    # returned when a module does not exist.
+                    if err.returncode in (5, 23):
+                        output = ""
+                    else:
+                        raise
+
+                listing = []
+                must_add_dot_entry = isdir
+
+                for line in output.splitlines():
+                    log.debug("list(%r): parsing rsync line: %r", path, line)
+
+                    try:
+                        if "\t" in line:
+                            name, comment = line.split("\t")
+                            filename = name.strip()
+                            size = DIR_INODE_SIZE
+                            attrs = "dr-xr-xr-x"
+                            dt = datetime.datetime.now()
+                        else:
+                            attrs, size_str, date, time, filename = line.split(
+                                None, 4
+                            )
+                            filename = rsync_unescape(filename)
+                            size = int(size_str.replace(',', ''))
+                            dt = datetime.datetime.strptime(
+                                f"{date} {time} +0000", "%Y/%m/%d %H:%M:%S %z"
+                            )
+
+                            if filename == ".":
+                                must_add_dot_entry = False
+                    except ValueError:
+                        log.error("list(%r): unparsable line: %r", path, line)
+                    else:
+                        entry = {
+                            "st_mode": text_to_mode(attrs),
+                            "size": size,
+                            "timestamp": dt.timestamp(),
+                            "filename": filename
+                        }
+                        listing.append(entry)
+                        log.debug("list(%r) -> %r", path, entry)
+                        self._list_cache.set(
+                            path + filename if isdir else path, [entry],
+                        )
+
+                if must_add_dot_entry:
+                    listing.append({
+                        "st_mode": text_to_mode("dr-xr-xr-x"),
+                        "size": DIR_INODE_SIZE,
+                        "timestamp": datetime.datetime.now().timestamp(),
+                        "filename": ".",
+                    })
+
+                if isdir:
+                    self._list_cache.set(path, listing)
+            finally:
+                lock.release()
+
+            break
 
         log.debug("list(%r) -> returning list; length %d", path, len(listing))
         return listing
@@ -493,8 +530,10 @@ class FuseRsync(fuse.Fuse):
         fd, localpath = tempfile.mkstemp()
         os.close(fd)
 
-        argv = [self.rsync, "--links", "--inplace", remote_url, localpath]
-        log.info("fetch(%r, ...): %s", path, " ".join(map(shlex.quote, argv)))
+        argv = ArgV(
+            [self.rsync, "--links", "--inplace", remote_url, localpath]
+        )
+        log.info("fetch(%r, ...): %s", path, argv)
         process = subprocess.Popen(argv, env=self._environment)
 
         if check_call and process.wait():
