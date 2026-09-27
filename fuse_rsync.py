@@ -26,6 +26,55 @@ RSYNC_ESCAPE_RE = re.compile(br"\\#([0-3][0-7][0-7])", re.ASCII)
 EXIT_BAD_USAGE = 2
 
 
+class LockPool:
+    """
+    This class is used to create a fixed-size pool of mutexes. At
+    initialization, a fixed number of locks are generated. When the user
+    requests a lock, the lock returned is based on a hash of the input.
+    """
+    def __init__(self, slots, *, reentrant=False):
+        """
+        Arguments:
+        - slots: Number of slots in the lock pool. This must be an integer
+          greater than or equal to 2.
+        - reentrant: When this is true, the locks will be re-entrant locks.
+        """
+        if slots < 2:
+            raise ValueError("Number of slots must be at least 2")
+
+        if reentrant:
+            lock = threading.RLock
+        else:
+            lock = threading.Lock
+
+        self.locks = [lock() for _ in range(slots)]
+
+    def __getitem__(self, key):
+        """
+        Return a lock for the specified key.
+
+        Arguments:
+        - key: Lock key. This must be a string or bytes.
+
+        Return: A lock.
+        """
+        if not isinstance(key, (str, bytes)):
+            raise TypeError("Key must be a string or bytes")
+
+        return self.locks[hash(key) % len(self.locks)]
+
+    def get(self, key):
+        """
+        Return a lock for the specified key.
+
+        Arguments:
+        - key: Lock key. This must be a string or bytes.
+
+        Return: A lock.
+        """
+        return self[key]
+
+
 class FuseStat(fuse.Stat):
     """
     An augmented version of fuse.Stat that implements __repr__ and __str__ with
@@ -311,9 +360,7 @@ class FuseRsync(fuse.Fuse):
             except subprocess.CalledProcessError as error:
                 return error.returncode
 
-            self._readlink_path_locks = collections.defaultdict(threading.Lock)
-            self._readlink_path_locks_lock = threading.RLock()
-
+            self._readlink_lock_pool = LockPool(2048)
             self._readlink_cache = TTLLRUMapping(
                 ttl=options.metadata_cache_ttl,
                 maxsize=None,
@@ -474,9 +521,7 @@ class FuseRsync(fuse.Fuse):
             destination = self._readlink_cache.get(path, None)
 
             if destination is None:
-                with self._readlink_path_locks_lock:
-                    lock = self._readlink_path_locks[path]
-
+                lock = self._readlink_lock_pool[path]
                 acquired = lock.acquire(False)
 
                 # Another thread is already fetching this file, so we wait on
