@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 
 import fuse
 
@@ -26,6 +27,10 @@ FILE_MODE_RE = re.compile("^.([-r][-w][-xsS]){2}([-r][-w][-xtT])$", re.ASCII)
 RSYNC_ESCAPE_RE = re.compile(br"\\#([0-3][0-7][0-7])", re.ASCII)
 
 EXIT_BAD_USAGE = 2
+
+DEFAULT_LOG_LEVEL = "INFO"
+LOG_LEVELS = ("FUSE_DEBUG", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+assert DEFAULT_LOG_LEVEL in LOG_LEVELS
 
 
 class ArgV(list):
@@ -245,35 +250,11 @@ class FuseRsync(fuse.Fuse):
     """
     Implementation of a FUSE filesystem for rsync protocol servers.
     """
-    def main(self, argv):
-        self.parser.add_option(
-            mountopt="user",
-            default=None,
-            help="Rsync user on the remote host"
-        )
-        self.parser.add_option(
-            mountopt="password",
-            type=str,
-            default=None,
-            help="Rsync password on the remote host"
-        )
-        self.parser.add_option(
-            mountopt="host",
-            type=str,
-            help="Remote rsync host"
-        )
-        self.parser.add_option(
-            mountopt="module",
-            type=str,
-            default="",
-            help="Rsync module on remote host"
-        )
-        self.parser.add_option(
-            mountopt="path",
-            type=str,
-            default="",
-            help="Path under the module that acts as the mountpoint root"
-        )
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.parser.usage = "%prog [OPTION]... [RSYNC_SERVER] [MOUNTPOINT]"
+
         self.parser.add_option(
             "-t", "--metadata-cache-ttl",
             default=300,
@@ -287,12 +268,36 @@ class FuseRsync(fuse.Fuse):
             help="Maximum number of file metadata entries cached in memory"
         )
         self.parser.add_option(
+            "-p",
+            dest="password_file",
+            metavar="FILE",
+            type="string",
+            help="Path of the file containing the rsync server password",
+        )
+        self.parser.add_option(
             "-e", "--rsync",
             default="rsync",
             type="str",
             help="Path or name of the rsync executable"
         )
 
+        self.parser.add_option(
+            "-v",
+            action="append_const",
+            const=-1,
+            dest="verbosity",
+            default=[],
+            help="Increase logging verbosity",
+        )
+        self.parser.add_option(
+            "-q",
+            action="append_const",
+            const=+1,
+            dest="verbosity",
+            help="Decrease logging verbosity",
+        )
+
+    def main(self, argv):
         try:
             super().parse(argv)
         except fuse.OptParseError:
@@ -300,23 +305,18 @@ class FuseRsync(fuse.Fuse):
         except Exception as exc:
             error = str(exc)
         else:
-            if "debug" in self.fuse_args.optlist:
-                logging.basicConfig(level=logging.DEBUG)
-            else:
-                logging.basicConfig(level=logging.ERROR)
-
             options, parameters = self.cmdline
 
             if len(parameters) > 1:
                 error = "Too many non-option arguments"
-            elif not parameters:
+            elif not self.fuse_args.mountpoint:
                 error = "Mountpoint not specified"
+            elif not parameters:
+                error = "Rsync server not specified"
             elif options.metadata_cache_ttl < 0:
                 error = "Cache TTL must be at least 0"
             elif options.metadata_cache_size < 1:
                 error = "Cache size must be greater than or equal to 1"
-            elif options.path and not options.module:
-                error = "A path cannot be specified without a module name"
             else:
                 error = None
 
@@ -325,65 +325,101 @@ class FuseRsync(fuse.Fuse):
         # gets called, so we have to detect whether the associated options were
         # used to determine if we should actually initialize the objects needed
         # to host the filesystem.
-        if (not self.fuse_args.getmod("showhelp") and
-            not self.fuse_args.getmod("showversion")):
+        if (self.fuse_args.getmod("showhelp") or
+            self.fuse_args.getmod("showversion")):
 
-            if error:
-                self.parser.print_usage()
-                print(error, file=sys.stderr)
+            return super().main()
+
+        if error:
+            self.parser.print_usage()
+            warn(error)
+            return EXIT_BAD_USAGE
+
+        if "debug" in self.fuse_args.optlist:
+            log_level = 0
+        else:
+            log_level = LOG_LEVELS.index(DEFAULT_LOG_LEVEL)
+
+            for delta in options.verbosity:
+                log_level = (
+                    max(0, min(len(LOG_LEVELS) - 1, log_level + delta))
+                )
+
+        # The fuse library logging is divorced from this module's logging, so
+        # at maximum user-specified verbosity, we need to enable FUSE's debug
+        # mode manually.
+        if log_level == 0:
+            self.fuse_args.optlist.add("debug")
+            log_level = 1
+
+        logging.getLogger().setLevel(LOG_LEVELS[log_level])
+
+        self._environment = os.environ.copy()
+        self._environment["TZ"] = "Etc/UTC"
+        self._environment["LC_ALL"] = "C"
+
+        endpoint = parameters[0]
+
+        if "://" in endpoint:
+            split_url = urllib.parse.urlsplit(endpoint)
+
+            if split_url.scheme != "rsync":
+                warn(f"URL scheme must be 'rsync'")
+                return EXIT_BAD_USAGE
+        else:
+            split_url = urllib.parse.urlsplit("rsync://" + endpoint)
+
+        if split_url.password is not None:
+            if options.password_file:
+                warn("Password file given, but URL also defines a password")
                 return EXIT_BAD_USAGE
 
-            self.rsync = options.rsync
-
-            self._file_cache = {}
-            self._file_cache_lock = threading.Lock()
-
-            self._environment = os.environ.copy()
-            self._environment["TZ"] = "Etc/UTC"
-            self._environment["LC_ALL"] = "C"
-
-            self._remote_url = "rsync://"
-
-            if options.user:
-                self._remote_url += options.user + "@"
-
-            self._remote_url += options.host
-
-            if options.module:
-                self._remote_url += "/" + options.module
-
-                if options.path:
-                    options.path = "/" + options.path.lstrip("/")
-                    self._remote_url = os.path.join(
-                        self._remote_url, os.path.relpath(options.path, "/")
-                    )
-
-            if options.password:
-                self._environment['RSYNC_PASSWORD'] = options.password
-
-            try:
-                # Perform a smoke test to verify that the remote URL is valid.
-                subprocess.check_call(
-                    [self.rsync, "--list-only", self._remote_url],
-                    env=self._environment,
-                    stdout=subprocess.DEVNULL,
+            warn(
+                "Passwords passed as arguments may be visible to other users."
+                " Consider using the \"RSYNC_PASSWORD\" environment variable"
+                " or the \"-p\" password file option."
+            )
+            self._environment["RSYNC_PASSWORD"] = split_url.password
+            split_url =  split_url._replace(
+                netloc=split_url.netloc.replace(
+                    f":{split_url.password}@", "@", count=1
                 )
-            except subprocess.CalledProcessError as error:
-                return error.returncode
-
-            self._readlink_lock_pool = LockPool(2048)
-            self._readlink_cache = TTLLRUMapping(
-                ttl=options.metadata_cache_ttl,
-                maxsize=None,
             )
+        elif options.password_file:
+            with open(options.password_file) as fd:
+                line = fd.readline()
+                self._environment["RSYNC_PASSWORD"] = line.removesuffix("\n")
 
-            self._list_lock_pool = LockPool(2048)
-            self._list_cache = TTLLRUMapping(
-                ttl=options.metadata_cache_ttl,
-                maxsize=options.metadata_cache_size,
+        self._remote_url = urllib.parse.urlunsplit(split_url).rstrip("/")
+
+        self.rsync = options.rsync
+
+        self._file_cache = {}
+        self._file_cache_lock = threading.Lock()
+
+        try:
+            # Perform a smoke test to verify that the remote URL is valid.
+            subprocess.check_call(
+                [self.rsync, "--list-only", self._remote_url],
+                env=self._environment,
+                stdout=subprocess.DEVNULL,
             )
+        except subprocess.CalledProcessError as error:
+            return error.returncode
 
-        super().main()
+        self._readlink_lock_pool = LockPool(2048)
+        self._readlink_cache = TTLLRUMapping(
+            ttl=options.metadata_cache_ttl,
+            maxsize=None,
+        )
+
+        self._list_lock_pool = LockPool(2048)
+        self._list_cache = TTLLRUMapping(
+            ttl=options.metadata_cache_ttl,
+            maxsize=options.metadata_cache_size,
+        )
+
+        return super().main()
 
     def list(self, path):
         """
@@ -804,6 +840,18 @@ def rsync_unescape(text):
     return text
 
 
+def warn(*args, **kwargs):
+    """
+    Works like the "print" built-in, but it defaults to writing to standard
+    error.
+
+    Arguments:
+    - args: See documentation for "print".
+    - kwargs: See documentation for "print".
+    """
+    return print(*args, **kwargs, file=sys.stderr)
+
+
 def text_to_mode(attrs):
     """
     Convert textual representation of a file's mode to its numeric
@@ -857,4 +905,4 @@ def text_to_mode(attrs):
 
 
 if __name__ == '__main__':
-    sys.exit(FuseRsync().main(sys.argv))
+    sys.exit(FuseRsync().main(sys.argv[1:]))
