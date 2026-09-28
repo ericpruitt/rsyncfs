@@ -459,10 +459,10 @@ class FuseRsync(fuse.Fuse):
             # Another thread already querying the server for this path, so we
             # wait on it to finish then check the cache again.
             if not acquired:
-                log.debug("list(%r): operation already in progress", path)
+                log.debug("list(%r): pool lock in use", path)
                 lock.acquire()
                 lock.release()
-                log.debug("list(%r): async operation done; retrying", path)
+                log.debug("list(%r): pool lock free; retrying", path)
                 continue
 
             try:
@@ -603,10 +603,10 @@ class FuseRsync(fuse.Fuse):
                 # it to finish then try to retrieve it from the readlink cache
                 # again.
                 if not acquired:
-                    log.debug("readlink(%r): fetch already in progress", path)
+                    log.debug("readlink(%r): pool lock in use", path)
                     lock.acquire()
                     lock.release()
-                    log.debug("readlink(%r): async fetch done; retrying", path)
+                    log.debug("readlink(%r): pool lock free; retrying", path)
                     continue
 
                 localpath = None
