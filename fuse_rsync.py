@@ -256,45 +256,50 @@ class FuseRsync(fuse.Fuse):
         self.parser.usage = "%prog [OPTION]... [RSYNC_SERVER] [MOUNTPOINT]"
 
         self.parser.add_option(
-            "-t", "--metadata-cache-ttl",
+            "-t",
+            dest="metadata_cache_ttl",
+            metavar="TTL_SEC",
             default=300,
             type="int",
-            help="Number of seconds file metadata is cached in memory"
+            help="number of seconds file metadata is cached in memory"
         )
         self.parser.add_option(
-            "-c", "--metadata-cache-size",
+            "-c",
+            dest="metadata_cache_size",
+            metavar="COUNT",
             default=8192,
             type="int",
-            help="Maximum number of file metadata entries cached in memory"
+            help="maximum number of file metadata entries cached in memory"
         )
         self.parser.add_option(
             "-p",
             dest="password_file",
             metavar="FILE",
             type="string",
-            help="Path of the file containing the rsync server password",
+            help="path of the file containing the rsync server password",
         )
         self.parser.add_option(
-            "-e", "--rsync",
+            "-e",
+            dest="rsync",
+            metavar="COMMAND",
             default="rsync",
-            type="str",
-            help="Path or name of the rsync executable"
+            type="string",
+            help="path or name of the rsync executable"
         )
-
         self.parser.add_option(
             "-v",
             action="append_const",
             const=-1,
             dest="verbosity",
             default=[],
-            help="Increase logging verbosity",
+            help="increase logging verbosity",
         )
         self.parser.add_option(
             "-q",
             action="append_const",
             const=+1,
             dest="verbosity",
-            help="Decrease logging verbosity",
+            help="decrease logging verbosity",
         )
 
     def main(self, argv):
