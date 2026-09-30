@@ -535,12 +535,20 @@ class FuseRsync(fuse.Fuse):
                         }
                         listing.append(entry)
                         log.debug("list(%r) -> %r", path, entry)
-                        key = path + filename if isdir else path
+
+                        if filename == ".":
+                            # If there's a "." entry, then we update the owning
+                            # directory's cached information using whatever it
+                            # returns.
+                            key = path.rstrip("/")
+                        else:
+                            key = path + filename if isdir else path
+
                         self._list_cache[key] = [entry]
 
                 if must_add_dot_entry:
                     listing.append({
-                        "st_mode": text_to_mode("dr-xr-xr-x"),
+                        "st_mode": text_to_mode("dr-x------"),
                         "size": DIR_INODE_SIZE,
                         "timestamp": datetime.datetime.now().timestamp(),
                         "filename": ".",
