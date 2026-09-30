@@ -117,8 +117,6 @@ class TTLLRUMapping:
     A class for defining a mapping with a finite number of members that have a
     user-defined validity period.
     """
-    _sentinel = object()
-
     def __init__(self, ttl, maxsize=128, *, data=None):
         """
         Arguments:
@@ -137,7 +135,7 @@ class TTLLRUMapping:
 
         if data:
             for key, value in dict(data).items():
-                self.set(key, value)
+                self[key] = value
 
     def _perform_ttl_evictions(self):
         """
@@ -163,14 +161,12 @@ class TTLLRUMapping:
         for key in expired_keys:
             self._dict.pop(key)
 
-    def get(self, key, default=_sentinel):
+    def __getitem__(self, key):
         """
-        Return the value for key if key is in the mapping, else default. If no
-        default value is specified, a KeyError is raised.
+        Return the value for key.
 
         Arguments:
         - key: Mapping key.
-        - default: The default value returned if the key is not in the mapping.
 
         Raises:
         - KeyError: No default value was specified, and the key does not exist
@@ -178,28 +174,39 @@ class TTLLRUMapping:
 
         Return: The value associated with the key in the mapping.
         """
-        try:
-            with self._lock:
-                # If a max size is defined, TTL evictions are handled by the
-                # "set" method.
-                if not self._maxsize:
-                    self._perform_ttl_evictions()
+        with self._lock:
+            # If a max size is defined, TTL evictions are handled by the
+            # "set" method.
+            if not self._maxsize:
+                self._perform_ttl_evictions()
 
-                value, expiration = self._dict.pop(key)
+            value, expiration = self._dict.pop(key)
 
-                if time.monotonic() >= expiration:
-                    raise KeyError
+            if time.monotonic() >= expiration:
+                raise KeyError
 
-                now = time.monotonic()
-                self._dict[key] = (value, now + self._ttl)
-                return value
-        except KeyError:
-            if default is not self._sentinel:
-                return default
+            now = time.monotonic()
+            self._dict[key] = (value, now + self._ttl)
+            return value
 
         raise KeyError(key)
 
-    def set(self, key, value):
+    def get(self, key, default=None):
+        """
+        Return the value for key if key is in the dictionary, else default.
+
+        Arguments:
+        - key: Mapping key.
+        - default: The default value returned if the key is not in the mapping.
+
+        Return: The value associated with the key in the mapping.
+        """
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __setitem__(self, key, value):
         """
         Set the mapping entry for the specified key to the specified value.
 
@@ -452,7 +459,7 @@ class FuseRsync(fuse.Fuse):
         isdir = path.endswith("/")
 
         while True:
-            listing = self._list_cache.get(path, None)
+            listing = self._list_cache.get(path)
 
             if listing is not None:
                 log.debug("list(%r): cache hit", path)
@@ -528,9 +535,8 @@ class FuseRsync(fuse.Fuse):
                         }
                         listing.append(entry)
                         log.debug("list(%r) -> %r", path, entry)
-                        self._list_cache.set(
-                            path + filename if isdir else path, [entry],
-                        )
+                        key = path + filename if isdir else path
+                        self._list_cache[key] = [entry]
 
                 if must_add_dot_entry:
                     listing.append({
@@ -541,7 +547,7 @@ class FuseRsync(fuse.Fuse):
                     })
 
                 if isdir:
-                    self._list_cache.set(path, listing)
+                    self._list_cache[path] = listing
             finally:
                 lock.release()
 
@@ -598,7 +604,7 @@ class FuseRsync(fuse.Fuse):
         log.debug("readlink(%r)", path)
 
         while True:
-            destination = self._readlink_cache.get(path, None)
+            destination = self._readlink_cache.get(path)
 
             if destination is None:
                 lock = self._readlink_lock_pool[path]
@@ -623,7 +629,7 @@ class FuseRsync(fuse.Fuse):
                     destination = -(getattr(error, "errno", 0) or errno.EIO)
                     log.error("readlink(%r): %s: %s", path, localpath, error)
                 finally:
-                    self._readlink_cache.set(path, destination)
+                    self._readlink_cache[path] = destination
                     lock.release()
 
                     if localpath:
