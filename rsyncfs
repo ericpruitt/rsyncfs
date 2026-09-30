@@ -253,7 +253,7 @@ class FuseRsync(fuse.Fuse):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.parser.usage = "%prog [OPTION]... [RSYNC_SERVER] [MOUNTPOINT]"
+        self.parser.usage = "%prog [OPTION]... RSYNC_SERVER MOUNTPOINT"
 
         self.parser.add_option(
             "-t",
