@@ -31,13 +31,13 @@ Usage
 ### Options ###
 
 - **-h, --help:** Show the documentation and exit.
-- **-o opt,[opt...]:** Mount options.
-- **-t TTL_SEC:** Number of seconds file metadata is cached in memory.
 - **-c COUNT:** Maximum number of file metadata entries cached in memory.
-- **-p FILE:** Path of the file containing the rsync server password.
 - **-e COMMAND:** Path or name of the rsync executable.
-- **-v:** Increase logging verbosity.
+- **-o opt,[opt...]:** Mount options.
+- **-p FILE:** Path of the file containing the rsync server password.
 - **-q:** Decrease logging verbosity.
+- **-t TTL_SEC:** Number of seconds file metadata is cached in memory.
+- **-v:** Increase logging verbosity.
 
 In addition to these options, the FUSE library also accepts a number of its own
 values. Refer to the output of "--help" for the full option list.
