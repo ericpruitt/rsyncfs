@@ -117,25 +117,25 @@ class TTLLRUMapping:
     A class for defining a mapping with a finite number of members that have a
     user-defined validity period.
     """
-    def __init__(self, ttl, maxsize=128, *, data=None):
+    def __init__(self, ttl, maxsize):
         """
         Arguments:
-        - ttl: Lifetime in seconds of mapping members.
+        - ttl: Lifetime in seconds of mapping members. When this is 0 or any
+          other false value, items never expire.
         - maxsize: The maximum number of values the mapping can hold before the
-          oldest items are evicted. If this value is 0 or None, the size is
-          unbounded.
-        - data: The initial set of members of the mapping. This can be any
-          value accepted by the `dict` built-in.
+          oldest items are evicted. If this value is 0, the size is unbounded.
         """
-        self._dict = collections.OrderedDict(data or ())
+        if ttl < 0:
+            raise ValueError("TTL must be at least 0")
+
+        if maxsize < 0:
+            raise ValueError("Bounding size must be at least 0")
+
+        self._dict = collections.OrderedDict()
         self._maxsize = maxsize
-        self._ttl = ttl
+        self._ttl = ttl or float("inf")
         self._lock = threading.RLock()
         self._next_eviction_check = time.monotonic() + self._ttl
-
-        if data:
-            for key, value in dict(data).items():
-                self[key] = value
 
     def _perform_ttl_evictions(self):
         """
@@ -169,27 +169,23 @@ class TTLLRUMapping:
         - key: Mapping key.
 
         Raises:
-        - KeyError: No default value was specified, and the key does not exist
-          in the mapping.
+        - KeyError: The key does not exist in the mapping.
 
         Return: The value associated with the key in the mapping.
         """
         with self._lock:
             # If a max size is defined, TTL evictions are handled by the
-            # "set" method.
+            # "__setitem__" method.
             if not self._maxsize:
                 self._perform_ttl_evictions()
 
-            value, expiration = self._dict.pop(key)
+            entry = value, expiration = self._dict.pop(key)
 
             if time.monotonic() >= expiration:
-                raise KeyError
+                raise KeyError(key)
 
-            now = time.monotonic()
-            self._dict[key] = (value, now + self._ttl)
+            self._dict[key] = entry
             return value
-
-        raise KeyError(key)
 
     def get(self, key, default=None):
         """
@@ -215,20 +211,27 @@ class TTLLRUMapping:
         - value: Mapped value.
         """
         with self._lock:
+            if not self._maxsize:
+                self._perform_ttl_evictions()
+
             now = time.monotonic()
 
             try:
                 self._dict.pop(key)
             except KeyError:
                 if self._maxsize and len(self._dict) >= self._maxsize:
-                    # While eliminating entries to reduce the amount of values
-                    # stored, we also prune any expired values even if it's not
-                    # necessary to get the dictionary below capacity.
+                    # Expirations are monotonic in dict order (constant TTL, and every
+                    # access re-appends), so only the head needs checking.
                     while self._dict:
-                        _, expiration = self._dict.popitem(last=False)
+                        _, expiration = next(iter(self._dict.values()))
 
                         if now < expiration:
                             break
+
+                        self._dict.popitem(last=False)
+
+                    if len(self._dict) >= self._maxsize:
+                        self._dict.popitem(last=False)
 
             self._dict[key] = (value, now + self._ttl)
 
@@ -327,8 +330,8 @@ class FuseRsync(fuse.Fuse):
                 error = "Rsync server not specified"
             elif options.metadata_cache_ttl < 0:
                 error = "Cache TTL must be at least 0"
-            elif options.metadata_cache_size < 1:
-                error = "Cache size must be greater than or equal to 1"
+            elif options.metadata_cache_size < 0:
+                error = "Cache size must be at least 0"
             else:
                 error = None
 
@@ -422,7 +425,7 @@ class FuseRsync(fuse.Fuse):
         self._readlink_lock_pool = LockPool(2048)
         self._readlink_cache = TTLLRUMapping(
             ttl=options.metadata_cache_ttl,
-            maxsize=None,
+            maxsize=0,
         )
 
         self._list_lock_pool = LockPool(2048)
