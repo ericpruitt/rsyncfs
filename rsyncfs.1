@@ -1,0 +1,70 @@
+.TH RSYNCFS 1 "%DATE%" "v%VERSION%"
+.SH NAME
+rsyncfs \- A FUSE filesystem that lets you mount rsync servers.
+.SH SYNOPSIS
+.B
+rsyncfs
+[OPTION]... RSYNC_SERVER MOUNTPOINT
+.SH DESCRIPTION
+.B rsyncfs
+is a FUSE filesystem that lets you mount rsync servers. This project was forked
+from zaddach/fuse-rsync and has been overhauled to address a number of issues
+and make it less painful to use. Most notably, I/O performance has been improved
+by making downloads asynchronous and adding extensive caching.
+.SH OPTIONS
+.TP
+.B \-h, \--help
+Show the documentation and exit.
+.TP
+.B \-c COUNT
+Maximum number of file metadata entries cached in memory. When this is 0, the
+number of cached entries is unbounded.
+.TP
+.B \-e COMMAND
+Path or name of the rsync executable.
+.TP
+.B \-p FILE
+Path of the file containing the rsync server password.
+.TP
+.B \-q
+Decrease logging verbosity. Can be specified repeatedly to further decrease
+verbosity.
+.TP
+.B \-t TTL_SEC
+Number of seconds file metadata is cached in memory. When this is 0, the items
+never expire.
+.TP
+.B \-v
+Increase logging verbosity. Can be specified repeatedly to further increase
+verbosity.
+.PP
+In addition to these options, the FUSE library also accepts a number of its own
+values. Refer to the output of "--help" for the full option list.
+.SH EXAMPLES
+Mount an unauthenticated rsync server:
+
+.RS
+.nf
+$ rsyncfs rsync://gutenberg.pglaf.org/ /mnt/project-gutenberg
+.fi
+.RE
+
+Mount a server that requires a password:
+
+.RS
+.nf
+$ RSYNC_PASSWORD=hunter2 rsyncfs ericpruitt@storage45.local/backups/ ~/mounts/backups
+.br
+$ rsyncfs -p ~/secrets/nas-password ericpruitt@storage45.local/backups/ ~/mounts/backups
+.fi
+.RE
+
+The password can also be specified in the URL, but this is not recommended since
+specifying passwords on the command line may make them visible to other users
+and/or processes on the same system:
+
+.RS
+.nf
+$ rsyncfs ericpruitt:hunter2@nas.local/backups/ ~/mounts/backups
+.fi
+.RE
