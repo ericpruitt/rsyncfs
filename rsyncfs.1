@@ -24,6 +24,10 @@ number of cached entries is unbounded.
 .B \-e COMMAND
 Path or name of the rsync executable.
 .TP
+.B \-o OPTION,[OPTION...]
+FUSE mount options; "-o auto_cache", "-o allow_other", etc. See "--help" for
+full list.
+.TP
 .B \-p FILE
 Path of the file containing the rsync server password.
 .TP
@@ -40,7 +44,7 @@ Increase logging verbosity. Can be specified repeatedly to further increase
 verbosity.
 .PP
 In addition to these options, the FUSE library also accepts a number of its own
-values. Refer to the output of "--help" for the full option list.
+values which are shown in the output of "--help".
 .SH EXAMPLES
 Mount an unauthenticated rsync server:
 

@@ -34,7 +34,8 @@ Usage
 - **-c COUNT:** Maximum number of file metadata entries cached in memory. When
   this is 0, the number of cached entries is unbounded.
 - **-e COMMAND:** Path or name of the rsync executable.
-- **-o opt,[opt...]:** Mount options.
+- **-o OPTION,[OPTION...]:** FUSE mount options; "-o auto_cache", "-o
+  allow_other", etc. See "--help" for full list.
 - **-p FILE:** Path of the file containing the rsync server password.
 - **-q:** Decrease logging verbosity. Can be specified repeatedly to further
   decrease verbosity.
@@ -44,7 +45,7 @@ Usage
   increase verbosity.
 
 In addition to these options, the FUSE library also accepts a number of its own
-values. Refer to the output of "--help" for the full option list.
+values which are shown in the output of "--help".
 
 ### Examples ###
 
