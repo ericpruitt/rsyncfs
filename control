@@ -1,0 +1,6 @@
+Architecture: all
+Depends: python3 (>= 3.9), python3-fuse (>= 2:1.0.0), rsync
+Description: A FUSE filesystem that lets you mount rsync servers.
+Maintainer: Eric Pruitt
+Package: rsyncfs
+Version: 1.0.0

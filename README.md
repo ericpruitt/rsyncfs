@@ -23,6 +23,18 @@ adding extensive caching:
 - The rsync server is now specified as a URL although the "rsync://" prefix can
   be omitted.
 
+Installation
+------------
+
+For Debian-based systems, run `make` inside the repository to generate a
+package which can be used to install the script. Alternatively, install
+[python3-fuse][python3-fuse-deb], your distro's equivalent, or install the
+library [from PyPI][fuse-python]. Copy the "rsyncfs" script to a `$PATH`
+directory which should then allow you to invoke the script with `rsyncfs ...`.
+
+  [python3-fuse-deb]: https://packages.debian.org/stable/python3-fuse
+  [fuse-python]: https://pypi.org/project/fuse-python/
+
 Usage
 -----
 
