@@ -36,10 +36,12 @@ Usage
 - **-e COMMAND:** Path or name of the rsync executable.
 - **-o opt,[opt...]:** Mount options.
 - **-p FILE:** Path of the file containing the rsync server password.
-- **-q:** Decrease logging verbosity.
+- **-q:** Decrease logging verbosity. Can be specified repeatedly to further
+  decrease verbosity.
 - **-t TTL_SEC:** Number of seconds file metadata is cached in memory. When
   this is 0, the items never expire.
-- **-v:** Increase logging verbosity.
+- **-v:** Increase logging verbosity. Can be specified repeatedly to further
+  increase verbosity.
 
 In addition to these options, the FUSE library also accepts a number of its own
 values. Refer to the output of "--help" for the full option list.
