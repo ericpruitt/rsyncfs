@@ -4,6 +4,7 @@
 DEB_TARGETS = \
 	deb/DEBIAN/control \
 	deb/usr/bin/rsyncfs \
+	deb/usr/share/doc/rsyncfs/copyright \
 	deb/usr/share/man/man1/rsyncfs.1 \
 
 package:
@@ -17,6 +18,9 @@ deb/DEBIAN/control: control
 
 deb/usr/bin/rsyncfs: rsyncfs
 	install -D -m 4755 $? $@
+
+deb/usr/share/doc/rsyncfs/copyright: LICENSE
+	install -m 644 -D $? $@
 
 deb/usr/share/man/man1/rsyncfs.1: rsyncfs.1
 	mkdir -p $(@D)
